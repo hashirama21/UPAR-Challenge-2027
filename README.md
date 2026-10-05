@@ -1,5 +1,12 @@
 # UPAR 2027 Challenge Track 1 & 2 Development Data @ Real-World Surveillance Workshop 2027
 
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/hashirama21/UPAR-Challenge-2027/blob/main/notebooks/pipeline.ipynb)
+
+**CSAR pipeline (Track 2)** — open [`notebooks/pipeline.ipynb`](notebooks/pipeline.ipynb) in Colab with the
+badge above to train, evaluate and export a submission end to end (`MODE = "smoke"` runs in ~1 min on
+synthetic data; `MODE = "full"` downloads the datasets). Code: [`src/`](src), details:
+[`README_impl.md`](README_impl.md).
+
 This repository prepares the public training and validation data for the two
 UPAR 2027 Challenge tracks:
 

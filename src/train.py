@@ -51,13 +51,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--data-dir", default="data")
     ap.add_argument("--out", type=Path, required=True, help="run directory (model.pt, config.json)")
     ap.add_argument("--holdout", choices=DOMAINS, help="LODO: drop this domain from train, evaluate on it")
-    # model
     ap.add_argument("--backbone", default="convnext_base", choices=sorted(BACKBONES))
     ap.add_argument("--height", type=int, default=256)
     ap.add_argument("--width", type=int, default=128)
     ap.add_argument("--embed-dim", type=int, default=256, help="0 disables the retrieval branch")
     ap.add_argument("--no-pretrained", action="store_true")
-    # optimisation
     ap.add_argument("--epochs", type=int, default=20)
     ap.add_argument("--batch-size", type=int, default=64)
     ap.add_argument("--lr", type=float, default=1e-4)
@@ -65,12 +63,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--warmup-epochs", type=float, default=1.0)
     ap.add_argument("--ema-decay", type=float, default=0.999)
     ap.add_argument("--no-augmix", action="store_true")
-    # sampling and losses
     ap.add_argument("--no-domain-balance", action="store_true")
     ap.add_argument("--query-alpha", type=float, default=0.0, help="sample weight n(query)^-alpha")
     for f in LossConfig.__dataclass_fields__.values():
         ap.add_argument(f"--{f.name.replace('_', '-')}", type=type(f.default), default=f.default)
-    # evaluation / misc
     ap.add_argument("--select-score", default="structured", choices=SCORES, help="score used for model selection")
     ap.add_argument("--eval-max-queries", type=int, default=0, help="subsample eval queries per epoch")
     ap.add_argument("--max-images", type=int, default=0, help="debug: random training subset")

@@ -37,6 +37,6 @@ def build_transform(height: int, width: int, train: bool, augmix: bool = True) -
             T.RandomResizedCrop((height, width), scale=(0.8, 1.0), ratio=(width / height * 0.9, width / height * 1.1)),
         ]
         if augmix:
-            steps.append(T.AugMix(all_ops=False))  # all_ops=False: no colour/brightness/contrast ops
+            steps.append(T.AugMix(all_ops=False))  # no colour ops
     steps += [T.ToTensor(), T.Normalize(IMAGENET_MEAN, IMAGENET_STD)]
     return T.Compose(steps)

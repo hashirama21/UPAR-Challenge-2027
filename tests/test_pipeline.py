@@ -165,10 +165,9 @@ def test_backbone_end_to_end(tmp_path, name):
     assert torch.allclose(ref, got, atol=0.05 * ref.abs().max().item() + 1e-3)
 
 
-# ---- end to end: train -> export -> run.py as the ingestion program would call it ------------------
 
 @pytest.mark.slow
-def test_end_to_end(tmp_path, val):  # noqa: ARG001 (val: skip without annotations)
+def test_end_to_end(tmp_path, val):
     from src import evaluate, export, train
 
     data = make_synthetic_data(ROOT / "data", tmp_path / "data")

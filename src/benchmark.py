@@ -24,13 +24,13 @@ def benchmark(name: str, device: torch.device, batch_size: int, iters: int, heig
     torch.save({k: v.half() for k, v in model.state_dict().items()}, buf)
     x = torch.randn(batch_size, 3, height, width, device=device)
     with torch.autocast(device.type, dtype=torch.float16, enabled=device.type == "cuda"):
-        model(x)  # warm-up
+        model(x)
         if device.type == "cuda":
             torch.cuda.synchronize()
         t0 = time.time()
         for _ in range(iters):
             model(x)
-            model(x.flip(-1))  # flip TTA, as in inference.predict
+            model(x.flip(-1))
         if device.type == "cuda":
             torch.cuda.synchronize()
     return {"params_M": sum(p.numel() for p in model.parameters()) / 1e6,

@@ -72,7 +72,7 @@ class CSARLoss:
     def _retrieval(self, model: CSARNet, emb: torch.Tensor, qid: np.ndarray) -> torch.Tensor:
         cand = self._candidates(qid)
         vocab = self.vocab[cand].to(emb.device)
-        cos = emb @ model.encode_queries(vocab).T                                  # (B, C)
+        cos = emb @ model.encode_queries(vocab).T
         pos = torch.as_tensor(np.searchsorted(cand, qid), device=emb.device)
         logits = self.cfg.ret_scale * (cos - self.cfg.ret_margin * F.one_hot(pos, len(cand)))
         if self.cfg.soft_tau <= 0:

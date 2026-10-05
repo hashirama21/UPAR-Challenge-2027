@@ -91,7 +91,6 @@ class Scorer:
     def num_queries(self) -> int:
         return self.q.shape[0]
 
-    # ---- elementary terms, each (b, G) for queries q[s:e] -------------------------------------
     def _bernoulli(self, q: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
         if mask is not None:
             return (q * mask) @ self.logp.T + ((1 - q) * mask) @ self.log1mp.T
@@ -131,7 +130,7 @@ class Scorer:
             shifted = F.pad(dist[..., :-1], (1, 0))
             dist = dist * (1 - wrong) + shifted * wrong
         k = torch.arange(kmax + 1, device=q.device, dtype=torch.float32)
-        credit = (1 - k[None, :] / cap[:, None]).clamp(min=0)   # (b, kmax+1)
+        credit = (1 - k[None, :] / cap[:, None]).clamp(min=0)
         return torch.einsum("bgk,bk->bg", dist, credit)
 
     def _posterior_normalizer(self, block: int = 64) -> torch.Tensor:
@@ -141,7 +140,6 @@ class Scorer:
             lse = torch.logaddexp(lse, torch.logsumexp(self._raw_exact(s, s + block), 0))
         return lse
 
-    # ---- public API ---------------------------------------------------------------------------
     def block(self, s: int, e: int) -> torch.Tensor:
         name = self.cfg.name
         if name == "l1":
