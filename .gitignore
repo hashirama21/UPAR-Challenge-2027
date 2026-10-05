@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+runs/
+submissions/
+*.zip
+data/Market1501/
+data/PA100k/
+data/PETA/
+.vscode/
+.ipynb_checkpoints/
