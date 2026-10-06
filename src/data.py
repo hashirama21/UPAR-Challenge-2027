@@ -79,18 +79,53 @@ def domain_fold(train: Split, val: Split, holdout: str) -> tuple[Split, Split]:
     return train.subset(train.domains != holdout), val.subset(val.domains == holdout)
 
 
-def query_mask(split: Split, frac: float = 1.0, num_queries: int = 0, seed: int = 0) -> np.ndarray:
+def query_mask(split: Split, frac: float = 1.0, num_queries: int = 0, seed: int = 0,
+               by_size: bool = False) -> np.ndarray:
     """Image mask selecting a random subset of queries (all their images).
 
     Use ``frac`` for a query-disjoint split (e.g. calibration / evaluation halves of
-    a held-out domain, with ``~mask``), or ``num_queries`` for test-sized galleries.
+    a held-out domain, with ``~mask``), or ``num_queries`` for test-sized galleries;
+    ``by_size`` draws queries in proportion to their image count, which yields the
+    many-images-per-query galleries of the hidden test (2024: ~77 per query).
     Apply with ``split.subset(mask)`` and the same mask on the predictions.
     """
     rng = np.random.default_rng(seed)
     n = len(split.queries)
+    k = min(num_queries, n) if num_queries else round(frac * n)
+    p = None
+    if by_size:
+        counts = np.bincount(split.query_ids, minlength=n).astype(np.float64)
+        p = counts / counts.sum()
     chosen = np.zeros(n, dtype=bool)
-    chosen[rng.permutation(n)[:min(num_queries, n) if num_queries else round(frac * n)]] = True
+    chosen[rng.choice(n, size=k, replace=False, p=p)] = True
     return chosen[split.query_ids]
+
+
+def novel_queries(split: Split, reference: Split) -> np.ndarray:
+    """Boolean per query of ``split``: True if the vector never occurs in ``reference``."""
+    known = {row.tobytes() for row in reference.queries}
+    return np.array([row.tobytes() not in known for row in split.queries])
+
+
+def sample_reliability(split: Split, strength: float) -> np.ndarray:
+    """Per-image weight exp(-strength * #attributes disagreeing with the identity majority).
+
+    Market1501 labels are per identity but set per image, so an image whose vector
+    departs from its identity's majority is likely mislabelled. Other domains get 1.
+    """
+    w = np.ones(len(split), dtype=np.float32)
+    market = split.domains == "Market1501"
+    if not strength or not market.any():
+        return w
+    ids = np.array([Path(p).name.split("_", 1)[0] for p in split.images[market]])
+    labels = split.labels[market].astype(np.float32)
+    _, inv = np.unique(ids, return_inverse=True)
+    sums = np.zeros((inv.max() + 1, labels.shape[1]))
+    np.add.at(sums, inv, labels)
+    majority = sums / np.bincount(inv)[:, None] >= 0.5
+    disagree = np.abs(labels - majority[inv]).sum(1)
+    w[market] = np.exp(-strength * disagree)
+    return w
 
 
 def sample_weights(split: Split, domain_balanced: bool = True, query_alpha: float = 0.0) -> np.ndarray:

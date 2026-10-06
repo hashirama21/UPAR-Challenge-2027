@@ -1,0 +1,151 @@
+# CSAR configuration: every value used by the entry points (src.train, src.evaluate,
+# src.lodo, src.experiments, src.combine, src.export, src.benchmark).
+# Typed and validated by the schema in src/config.py. Override on the command line:
+#   python -m src.train model.backbone=clip_vitb16 model.head=query optim.epochs=10
+# Groups: profile=full|smoke (scale of the run), experiment=full|smoke (candidates).
+
+defaults:
+  - schema
+  - _self_
+  - profile: full
+  - experiment: full
+  - override hydra/job_logging: none
+  - override hydra/hydra_logging: none
+
+hydra:
+  run:
+    dir: .
+  sweep:
+    dir: .
+    subdir: ${hydra.job.num}
+  output_subdir: null
+  job:
+    chdir: false
+
+run:
+  device: auto              # auto | cpu | cuda
+  workers: 8
+  seed: 0
+  inference_batch: 128
+
+data:
+  dir: data
+  holdout: null             # LODO: Market1501 | PA100k | PETA
+  max_images: 0             # debug: random training subset (0 = all)
+  eval_max_queries: 0       # subsample selection queries per epoch (0 = all)
+  domain_balance: true      # equal sampling mass per source domain
+  query_alpha: 0.0          # sample weight n(query)^-alpha
+  reliability: 0.0          # Market1501 label-disagreement down-weighting
+
+augment:                    # geometric only: no colour ops, no random erasing
+  low_res: 0.3              # probability of the low-resolution round-trip
+  low_res_min_scale: 0.25
+  crop_scale_min: 0.8
+  rotate_deg: 5.0
+  translate: 0.05
+  scale_jitter: 0.05
+
+model:
+  backbone: convnext_base   # see src/model.py BACKBONES (torchvision CNNs/Swin, DINOv2/v3, CLIP, SigLIP 2)
+  height: 256               # rounded to the backbone patch size
+  width: 128
+  dropout: 0.2
+  embed_dim: 256            # retrieval branch (0 disables it)
+  head: linear              # linear | query
+  query_layers: 1
+  query_heads: 8
+  query_hidden: 512
+  pretrained: true
+  text_init: false          # query head initialised from CLIP text (clip_* backbones)
+  lora_rank: 0              # LoRA on the backbone (0 = full or partial fine-tuning)
+  lora_alpha: null          # null = rank
+  trainable_stages: -1      # -1 = all, N = only the last N stages
+
+optim:
+  epochs: 20
+  batch_size: 64
+  lr: 1.0e-4
+  weight_decay: 5.0e-4
+  scheduler: plateau        # plateau | cosine
+  warmup_epochs: 1.0
+  plateau_patience: 2
+  plateau_factor: 0.1
+  ema_decay: 0.999
+  backbone_lr_mult: 1.0
+
+loss:
+  smoothing: 0.05
+  noisy_smoothing: 0.1
+  noisy_domains: [Market1501, PETA]
+  w_group: 0.5
+  w_ret: 0.2
+  ret_scale: 20.0
+  ret_margin: 0.2
+  margin_type: arc          # arc | cos
+  hard_negatives: 4
+  neighbor_max_dist: 2
+  neighbor_max_count: 32
+  soft_targets: false
+
+train:
+  out: runs/final
+  select_score: structured  # score used to select the epoch
+  calibration: temperature  # temperature | platt | none
+
+score:                      # frozen into the checkpoint, used by run.py
+  name: structured          # l1 | loglik | structured | endom | mix
+  exact: structured         # exact term of mix: loglik | structured
+  lam: 1.0
+  gamma: 0.0
+  transductive: false       # posterior over the query set: needs written approval
+  background: -40.0
+  group_weights: null
+
+eval:
+  checkpoint: null
+  simulate: null            # oracle study: logit noise sigma (no checkpoint needed)
+  simulate_signal: 3.0
+  holdout: null
+  calib_frac: 0.0           # > 0: fit calibration on this query fraction, evaluate on the rest
+  calibration: temperature  # temperature | platt
+  scores: [loglik, structured, mix]
+  lams: [1.0]
+  gammas: [0.0]
+  tune_group_weights: false
+  group_weight_grid: [0.5, 1.0, 1.5, 2.0]
+  open_set: 0.0             # experiment B: fraction of queries removed
+  resample: 0               # test-like gallery: N queries drawn by size
+  max_queries: 0            # speed: N uniformly drawn queries
+  by_domain: true
+  compare_uncalibrated: true  # also report every score without calibration
+  cache: null
+  save_best: false
+
+runtime:                    # frozen into the checkpoint, used by run.py
+  flip: true
+  scales: [1.0]
+  time_budget_s: 0.0        # degraded mode (0 = unlimited)
+  probe_images: 256
+
+lodo:
+  root: runs/lodo
+  domains: [Market1501, PA100k, PETA]
+  final: null               # checkpoint receiving the LODO score config and calibration
+
+export:
+  checkpoint: null
+  out: submissions/csar
+  fp32: false
+  overwrite: false
+
+combine:
+  mode: ensemble            # ensemble | soup | wise
+  checkpoints: []
+  alpha: 0.5                # WiSE-FT weight of the fine-tuned model
+  out: null
+
+benchmark:
+  backbones: []             # empty = all
+  batch_size: 32
+  iters: 3
+  images: 28095             # 2024 test gallery size

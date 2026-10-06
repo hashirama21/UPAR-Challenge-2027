@@ -9,3 +9,5 @@ data/PA100k/
 data/PETA/
 .vscode/
 .ipynb_checkpoints/
+*.log
+data/Market-1501-v15.09.15/

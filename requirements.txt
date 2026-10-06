@@ -1,0 +1,12 @@
+# Training, evaluation, notebook and tests. The submission itself only needs what the
+# Codabench image ships (torch, torchvision, numpy, Pillow).
+torch>=2.4
+torchvision>=0.19
+numpy
+Pillow
+hydra-core>=1.3
+omegaconf>=2.3
+pytest
+nbformat
+nbclient
+ipykernel

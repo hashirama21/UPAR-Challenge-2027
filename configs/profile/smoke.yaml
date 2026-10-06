@@ -1,0 +1,18 @@
+# @package _global_
+# CPU smoke runs on tiny synthetic data: checks that every stage runs end to end.
+run:
+  device: cpu
+  workers: 0
+model:
+  pretrained: false
+  height: 64
+  width: 32
+optim:
+  epochs: 1
+  batch_size: 16
+eval:
+  by_domain: false
+  gammas: [0.0, 0.5]
+  lams: [1.0, 30.0]
+runtime:
+  probe_images: 16

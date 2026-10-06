@@ -1,0 +1,12 @@
+# Smoke candidates: one per fine-tuning mode (linear / query head, LoRA, partial + text init).
+root: runs/experiments_smoke
+lodo: best
+ensemble_top_k: 2
+wise_alpha: 0.5
+export: submissions/smoke
+candidates:
+  resnet18_linear: [model.backbone=resnet18]
+  resnet18_query: [model.backbone=resnet18, model.head=query]
+  dinov2_vits14_lora: [model.backbone=dinov2_vits14, model.lora_rank=4, optim.lr=5.0e-4]
+  clip_vitb16_query_text: [model.backbone=clip_vitb16, model.head=query, model.text_init=true,
+                           model.trainable_stages=2, optim.backbone_lr_mult=0.1]

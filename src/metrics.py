@@ -24,19 +24,21 @@ def _order(row: np.ndarray, key: str) -> np.ndarray:
     raise ValueError(f"key must be one of {KEYS}")
 
 
-def evaluate_blocks(blocks: Iterable[np.ndarray], queries: np.ndarray, gallery: np.ndarray,
-                    key: str = "similarities") -> dict[str, float]:
-    """``blocks`` yields consecutive (b, G) score rows covering all queries in order."""
+def per_query_metrics(blocks: Iterable[np.ndarray], queries: np.ndarray, gallery: np.ndarray,
+                      key: str = "similarities") -> dict[str, np.ndarray]:
+    """One value per query and metric (NaN for queries without a match).
+
+    ``blocks`` yields consecutive (b, G) score rows covering all queries in order.
+    """
     q_all = queries.astype(np.int32)
     g = gallery.astype(np.int32)
     n_attr = q_all.shape[1]
-    res: dict[str, list[float]] = {m: [] for m in METRICS}
+    res = {m: np.full(len(q_all), np.nan) for m in METRICS}
     s = 0
     for mat in blocks:
         qb = q_all[s:s + len(mat)]
-        s += len(mat)
         agree = qb @ g.T + (1 - qb) @ (1 - g).T
-        for row, ag in zip(np.asarray(mat), agree):
+        for i, (row, ag) in enumerate(zip(np.asarray(mat), agree), start=s):
             order = _order(row, key)
             ranks = np.flatnonzero(ag[order] == n_attr) + 1
             if len(ranks) == 0:
@@ -46,14 +48,43 @@ def evaluate_blocks(blocks: Iterable[np.ndarray], queries: np.ndarray, gallery: 
             ndom = np.maximum(0.0, (dom - mean) / (top - mean)) if top > mean else np.zeros_like(dom)
             cum = np.cumsum(ndom[order])
             n = len(ranks)
-            res["mADM"].append(float(np.mean(cum[ranks - 1] / ranks)))
-            res["mAP"].append(float(np.mean(np.arange(1, n + 1) / ranks)))
-            res["mINP"].append(float(n / ranks[-1]))
+            res["mADM"][i] = np.mean(cum[ranks - 1] / ranks)
+            res["mAP"][i] = np.mean(np.arange(1, n + 1) / ranks)
+            res["mINP"][i] = n / ranks[-1]
             for k in (1, 5, 10):
-                res[f"R{k}"].append(float(ranks[0] <= k))
+                res[f"R{k}"][i] = float(ranks[0] <= k)
+        s += len(mat)
     if s != len(q_all):
         raise ValueError(f"blocks covered {s} queries, expected {len(q_all)}")
-    return {m: float(np.mean(v)) if v else float("nan") for m, v in res.items()}
+    return res
+
+
+def summarize(per_query: dict[str, np.ndarray], mask: np.ndarray | None = None) -> dict[str, float]:
+    """Mean over queries with at least one match (optionally restricted to ``mask``)."""
+    out = {}
+    for m, v in per_query.items():
+        v = v if mask is None else v[mask]
+        v = v[~np.isnan(v)]
+        out[m] = float(v.mean()) if len(v) else float("nan")
+    return out
+
+
+def evaluate_blocks(blocks: Iterable[np.ndarray], queries: np.ndarray, gallery: np.ndarray,
+                    key: str = "similarities") -> dict[str, float]:
+    return summarize(per_query_metrics(blocks, queries, gallery, key))
+
+
+def expected_calibration_error(probs: np.ndarray, labels: np.ndarray, bins: int = 15) -> np.ndarray:
+    """ECE per attribute (column) with equal-width confidence bins."""
+    probs, labels = np.asarray(probs, dtype=np.float64), np.asarray(labels, dtype=np.float64)
+    idx = np.minimum((probs * bins).astype(int), bins - 1)
+    ece = np.zeros(probs.shape[1])
+    for b in range(bins):
+        in_bin = idx == b
+        n = in_bin.sum(0)
+        gap = np.abs((probs * in_bin).sum(0) - (labels * in_bin).sum(0))
+        ece += np.where(n > 0, gap, 0.0)
+    return ece / len(probs)
 
 
 def evaluate_output(output: dict, queries: np.ndarray, gallery: np.ndarray, block: int = 256) -> dict[str, float]:

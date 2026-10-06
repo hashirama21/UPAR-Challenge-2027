@@ -1,17 +1,19 @@
 """Build the Codabench code submission (directory + zip) from a checkpoint.
 
-    python -m src.export --checkpoint runs/final/model.pt --out submissions/final
+    python -m src.export export.checkpoint=runs/final/model.pt export.out=submissions/final
 
 Layout (run.py at the zip root, as the ingestion program expects):
     run.py  metadata.yaml  assets/model.pt  src/*.py
 """
 from __future__ import annotations
 
-import argparse
 import shutil
 from pathlib import Path
 
+from omegaconf import DictConfig
+
 from .checkpoint import Bundle
+from .config import entrypoint
 
 ROOT = Path(__file__).resolve().parent.parent
 PACKAGE = Path(__file__).resolve().parent
@@ -33,16 +35,16 @@ def export(checkpoint: Path, out: Path, half: bool = True, overwrite: bool = Fal
     return Path(shutil.make_archive(str(out), "zip", root_dir=out))
 
 
-def main(argv: list[str] | None = None) -> None:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--checkpoint", type=Path, required=True)
-    ap.add_argument("--out", type=Path, default=Path("submissions/csar"))
-    ap.add_argument("--overwrite", action="store_true")
-    ap.add_argument("--fp32", action="store_true", help="keep fp32 weights (fp16 halves the zip)")
-    args = ap.parse_args(argv)
-    archive = export(args.checkpoint, args.out, half=not args.fp32, overwrite=args.overwrite)
+def run(cfg: DictConfig) -> Path:
+    e = cfg.export
+    if not e.checkpoint:
+        raise ValueError("set export.checkpoint")
+    archive = export(Path(e.checkpoint), Path(e.out), half=not e.fp32, overwrite=e.overwrite)
     print(f"{archive} ({archive.stat().st_size / 2**20:.1f} MiB)")
+    return archive
 
+
+main = entrypoint(run)
 
 if __name__ == "__main__":
     main()

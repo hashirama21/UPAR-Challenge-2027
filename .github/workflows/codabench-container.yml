@@ -1,0 +1,39 @@
+name: codabench-container
+
+# Runs the code in the image used by the Codabench ingestion program:
+# unit tests, a smoke submission build, then the submission itself offline
+# (--network none) with nothing but the packages shipped in the image.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  container:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      IMAGE: pytorch/pytorch:2.4.1-cuda12.1-cudnn9-runtime
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space for the image
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+
+      - name: Pull the Codabench image
+        run: docker pull "$IMAGE"
+
+      - name: Unit tests inside the image
+        run: >
+          docker run --rm -v "$PWD":/work -w /work "$IMAGE"
+          bash -c "pip install -q -r requirements.txt && python -m pytest -q -m 'not slow' -p no:cacheprovider"
+
+      - name: Build a smoke submission inside the image
+        run: >
+          docker run --rm -v "$PWD":/work -w /work "$IMAGE"
+          bash -c "pip install -q -r requirements.txt && python scripts/container_check.py build --work /work/ci"
+
+      - name: Run the submission offline (no network, image packages only)
+        run: >
+          docker run --rm --network none -v "$PWD/ci":/ci -v "$PWD/scripts":/scripts:ro "$IMAGE"
+          python /scripts/container_check.py ingest --work /ci

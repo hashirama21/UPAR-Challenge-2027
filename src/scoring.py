@@ -10,6 +10,12 @@ Scores (higher = better match), selected by ``ScoreConfig.name``:
     endom       E[ndom] under a Poisson-binomial on the number of wrong attributes
     mix         E[ndom] + lam * P_exact, P_exact = exp(exact score)
 
+``group_weights`` are the w_k of S3 (one per group, independent attributes keep 1).
+Ties never fall back to the gallery order: ``block`` sorts lexicographically by
+the score, then by the *unclipped* log-likelihood (clipped probabilities and
+E[ndom] = 0 tie otherwise), and returns the ranks as similarities (G = best).
+``score`` gives the raw values.
+
 The mean degree of match per query (needed by ndom) comes from the *training*
 attribute prior, not the test gallery: E[dom_q] = mean_a q_a pi_a + (1-q_a)(1-pi_a).
 
@@ -19,7 +25,6 @@ the full set of test queries: keep it off unless organisers approve it in writin
 """
 from __future__ import annotations
 
-import math
 from dataclasses import asdict, dataclass
 from typing import Iterator
 
@@ -32,21 +37,24 @@ from .calibration import Predictions
 
 SCORES = ("l1", "loglik", "structured", "endom", "mix")
 EPS = 1e-4
-TIE_EPS = 1e-5  # weight of the continuous tie-breaker; ties must never fall back to gallery order
 
 
 @dataclass
 class ScoreConfig:
-    name: str = "structured"
-    exact: str = "structured"   # exact-match term used by "mix": loglik | structured
-    lam: float = 1.0
-    gamma: float = 0.0          # weight of the learned query-image compatibility
-    transductive: bool = False
-    background: float = -40.0   # log-score of the "no query" class (transductive only)
+    """Values come from configs/config.yaml (``score``) and are frozen into the checkpoint."""
+    name: str
+    exact: str                  # exact-match term used by "mix": loglik | structured
+    lam: float
+    gamma: float                # weight of the learned query-image compatibility
+    transductive: bool
+    background: float           # log-score of the "no query" class (transductive only)
+    group_weights: list[float] | None
 
     def __post_init__(self):
         if self.name not in SCORES or self.exact not in ("loglik", "structured"):
             raise ValueError(f"invalid score config {self}")
+        if self.group_weights is not None and len(self.group_weights) != len(GROUPS):
+            raise ValueError(f"group_weights needs {len(GROUPS)} values")
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -71,6 +79,7 @@ class Scorer:
         dev = torch.device(device)
         attr = preds["attr"].float().to(dev)
         self.p = torch.sigmoid(attr).clamp(EPS, 1 - EPS)
+        self.raw_logp, self.raw_log1mp = F.logsigmoid(attr).double(), F.logsigmoid(-attr).double()
         self.logp, self.log1mp = self.p.log(), (1 - self.p).log()
         self.group_logp = [F.log_softmax(preds[f"group/{g.name}"].float().to(dev), -1) for g in GROUPS]
         self.emb = preds.get("emb")
@@ -82,6 +91,7 @@ class Scorer:
         self.dom_bar = (self.q @ prior + (1 - self.q) @ (1 - prior)) / NUM_ATTRS
         self._indep = _mask(INDEPENDENT, dev)
         self._group_masks = [_mask(g.indices, dev) for g in GROUPS]
+        self._group_w = cfg.group_weights or [1.0] * len(GROUPS)
         self._kind = cfg.name if cfg.name in ("loglik", "structured") else cfg.exact
         self._log_norm = None
         if cfg.transductive:
@@ -105,7 +115,7 @@ class Scorer:
             ok = cls >= 0
             if ok.any():
                 term[ok] = self.group_logp[k][:, cls[ok]].T
-            score = score + term
+            score = score + self._group_w[k] * term
         if self.cfg.gamma and self.emb is not None and self.q_emb is not None:
             score = score + self.cfg.gamma * self.q_emb[s:e] @ self.emb.T
         return score
@@ -140,17 +150,29 @@ class Scorer:
             lse = torch.logaddexp(lse, torch.logsumexp(self._raw_exact(s, s + block), 0))
         return lse
 
-    def block(self, s: int, e: int) -> torch.Tensor:
+    def score(self, s: int, e: int) -> torch.Tensor:
+        """(b, G) raw scores for queries s:e, higher is better (may contain ties)."""
         name = self.cfg.name
         if name == "l1":
             return -(self.p.sum(1)[None] + self.q[s:e] @ (1 - 2 * self.p).T)
         if name in ("loglik", "structured"):
             return self._exact(s, e)
         endom = self._expected_ndom(s, e)
-        exact = self._exact(s, e)
-        primary = endom if name == "endom" else endom + self.cfg.lam * exact.exp()
-        # Continuous tie-breaker: E[ndom] is exactly 0 for many far images.
-        return primary + TIE_EPS * exact / (NUM_ATTRS * -math.log(EPS))
+        return endom if name == "endom" else endom + self.cfg.lam * self._exact(s, e).exp()
+
+    def _tie_breaker(self, s: int, e: int) -> torch.Tensor:
+        q = self.q[s:e].double()
+        return q @ self.raw_logp.T + (1 - q) @ self.raw_log1mp.T
+
+    def block(self, s: int, e: int) -> torch.Tensor:
+        """(b, G) float64 tie-free similarities: G for the best image down to 1."""
+        primary, secondary = self.score(s, e).double(), self._tie_breaker(s, e)
+        by_secondary = torch.argsort(secondary, dim=1, descending=True, stable=True)
+        order = by_secondary.gather(1, torch.argsort(primary.gather(1, by_secondary), dim=1,
+                                                     descending=True, stable=True))
+        n = primary.shape[1]
+        ranks = torch.arange(n, 0, -1, dtype=torch.float64, device=primary.device).expand_as(primary)
+        return torch.empty_like(primary).scatter_(1, order, ranks)
 
     def blocks(self, size: int = 64) -> Iterator[np.ndarray]:
         for s in range(0, self.num_queries, size):
@@ -158,4 +180,4 @@ class Scorer:
 
     def full(self, size: int = 64) -> np.ndarray:
         return np.concatenate(list(self.blocks(size)), axis=0) if self.num_queries else \
-            np.zeros((0, self.p.shape[0]), dtype=np.float32)
+            np.zeros((0, self.p.shape[0]), dtype=np.float64)

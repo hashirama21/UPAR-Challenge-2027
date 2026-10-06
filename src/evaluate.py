@@ -1,21 +1,24 @@
 """Evaluation: score functions x calibration x gallery protocols, per domain.
 
-Examples
---------
+Reports mADM per source domain and, separately, for queries seen in train vs
+novel ones; ECE per domain before/after calibration; optional coordinate-ascent
+tuning of the S3 group weights w_k. Works for single models and ensembles.
+All settings: ``configs/config.yaml`` (``eval``, ``score``).
+
 Oracle simulation from ground truth (no images needed, reproduces the README study):
-    python -m src.evaluate --simulate 2.0 --scores l1 loglik structured endom mix
+    python -m src.evaluate eval.simulate=2.0 "eval.scores=[l1,loglik,structured,endom,mix]"
 
 Trained model on a LODO fold, calibration fitted on a query-disjoint half of the
-held-out domain, sweep of lam, best config written back into the checkpoint:
-    python -m src.evaluate --checkpoint runs/lodo_peta/model.pt --holdout PETA \
-        --calib-frac 0.5 --scores loglik structured mix --lams 0.3 1 3 --save-best
+held-out domain, sweep of lam / gamma / w_k, best config written back into the checkpoint:
+    python -m src.evaluate eval.checkpoint=runs/lodo/PETA/model.pt eval.holdout=PETA eval.calib_frac=0.5 \
+        "eval.lams=[1,30]" eval.tune_group_weights=true eval.save_best=true
 
-Experiment B (open set): ``--open-set 0.2`` removes 20 % of the queries and keeps
-their images as distractors. ``--resample 367`` mimics the 2024 test size.
+Experiment B (open set): ``eval.open_set=0.2`` removes 20 % of the queries and keeps
+their images as distractors. ``eval.resample=367`` builds a test-like gallery
+(queries drawn by size, as in the 2024 test).
 """
 from __future__ import annotations
 
-import argparse
 import itertools
 import json
 import logging
@@ -25,14 +28,16 @@ from typing import Callable
 
 import numpy as np
 import torch
+from omegaconf import DictConfig
 
 from .attributes import GROUPS
 from .calibration import Calibration, Predictions, fit_calibration
 from .checkpoint import Bundle
-from .data import DOMAINS, Split, load_split, query_mask
+from .config import device as resolve_device, entrypoint, score_config, to_dict
+from .data import DOMAINS, Split, load_split, novel_queries, query_mask
 from .inference import encode_queries, predict
-from .metrics import METRICS, evaluate_blocks
-from .scoring import SCORES, ScoreConfig, Scorer
+from .metrics import METRICS, expected_calibration_error, per_query_metrics, summarize
+from .scoring import ScoreConfig, Scorer
 
 log = logging.getLogger(__name__)
 QueryEncoder = Callable[[np.ndarray], "torch.Tensor | None"]
@@ -44,26 +49,61 @@ def select(preds: Predictions, mask: np.ndarray) -> Predictions:
 
 
 def score_split(preds: Predictions, split: Split, cfg: ScoreConfig, prior: np.ndarray,
-                encoder: QueryEncoder | None = None, device: str = "cpu", block: int = 64) -> dict[str, float]:
+                encoder: QueryEncoder | None = None, device: str = "cpu", block: int = 64) -> dict[str, np.ndarray]:
+    """Per-query metrics of ``cfg`` on ``split``."""
     q_emb = encoder(split.queries) if encoder is not None and cfg.gamma else None
     scorer = Scorer(cfg, preds, split.queries, prior, q_emb, device)
-    return evaluate_blocks(scorer.blocks(block), split.queries, split.labels)
+    return per_query_metrics(scorer.blocks(block), split.queries, split.labels)
 
 
 def report(preds: Predictions, split: Split, cfg: ScoreConfig, prior: np.ndarray,
-           encoder: QueryEncoder | None = None, device: str = "cpu", by_domain: bool = True) -> dict[str, dict]:
-    """Metrics on the whole gallery and, separately, on each source domain (protocol rebuilt)."""
-    out = {"all": score_split(preds, split, cfg, prior, encoder, device)}
+           encoder: QueryEncoder | None = None, device: str = "cpu", by_domain: bool = True,
+           novel: np.ndarray | None = None) -> dict[str, dict]:
+    """Metrics on the whole gallery, per source domain (protocol rebuilt) and seen/novel queries."""
+    per_query = score_split(preds, split, cfg, prior, encoder, device)
+    out = {"all": summarize(per_query)}
+    if novel is not None and novel.any() and not novel.all():
+        out["seen"], out["novel"] = summarize(per_query, ~novel), summarize(per_query, novel)
     if by_domain:
         doms = split.domains
         for d in DOMAINS:
             mask = doms == d
             if mask.any() and mask.sum() < len(split):
-                out[d] = score_split(select(preds, mask), split.subset(mask), cfg, prior, encoder, device)
+                out[d] = summarize(score_split(select(preds, mask), split.subset(mask), cfg, prior, encoder, device))
     return out
 
 
-def simulate(split: Split, sigma: float, signal: float = 3.0, seed: int = 0) -> Predictions:
+def ece_report(preds: Predictions, split: Split) -> dict[str, float]:
+    """Mean per-attribute ECE overall and per source domain."""
+    probs = torch.sigmoid(preds["attr"]).numpy()
+    out = {"all": float(expected_calibration_error(probs, split.labels).mean())}
+    doms = split.domains
+    for d in DOMAINS:
+        mask = doms == d
+        if mask.any() and mask.sum() < len(split):
+            out[d] = float(expected_calibration_error(probs[mask], split.labels[mask]).mean())
+    return out
+
+
+def tune_group_weights(preds: Predictions, split: Split, cfg: ScoreConfig, prior: np.ndarray,
+                       encoder: QueryEncoder | None, device: str, grid: list[float]) -> ScoreConfig:
+    """One pass of coordinate ascent on the S3 group weights w_k (mADM on ``split``)."""
+    def madm(weights: list[float]) -> float:
+        return summarize(score_split(preds, split, replace(cfg, group_weights=weights), prior, encoder, device))["mADM"]
+
+    weights = list(cfg.group_weights or [1.0] * len(GROUPS))
+    best = madm(weights)
+    for k, g in enumerate(GROUPS):
+        for w in grid:
+            trial = weights[:k] + [w] + weights[k + 1:]
+            score = madm(trial)
+            if score > best:
+                best, weights = score, trial
+        log.info("w[%s] = %g (mADM %.4f)", g.name, weights[k], best)
+    return replace(cfg, group_weights=weights)
+
+
+def simulate(split: Split, sigma: float, signal: float, seed: int) -> Predictions:
     """Ground truth + independent Gaussian logit noise (oracle study of score functions)."""
     g = torch.Generator().manual_seed(seed)
     y = torch.as_tensor(split.labels, dtype=torch.float32)
@@ -81,108 +121,119 @@ def simulate(split: Split, sigma: float, signal: float = 3.0, seed: int = 0) -> 
 
 
 def format_table(rows: list[tuple[str, dict[str, dict]]]) -> str:
-    domains = list(rows[0][1]) if rows else []
-    head = f"{'config':<44}" + "".join(f"{d[:10] + ' mADM':>16}" for d in domains) + \
+    columns = list(rows[0][1]) if rows else []
+    head = f"{'config':<44}" + "".join(f"{c[:10] + ' mADM':>16}" for c in columns) + \
         "".join(f"{m:>8}" for m in METRICS if m != "mADM")
     lines = [head, "-" * len(head)]
     for name, res in rows:
-        lines.append(f"{name:<44}" + "".join(f"{res[d]['mADM']:>16.4f}" for d in domains)
+        lines.append(f"{name:<44}" + "".join(f"{res[c]['mADM']:>16.4f}" for c in columns)
                      + "".join(f"{res['all'][m]:>8.4f}" for m in METRICS if m != "mADM"))
     return "\n".join(lines)
 
 
-def candidate_configs(base: ScoreConfig, scores: list[str], lams: list[float], gammas: list[float],
-                      transductive: bool) -> list[ScoreConfig]:
+def candidate_configs(base: ScoreConfig, scores: list[str], lams: list[float],
+                      gammas: list[float]) -> list[ScoreConfig]:
     cfgs = []
     for name in scores:
         lam_grid = lams if name == "mix" else [base.lam]
         gamma_grid = gammas if name in ("structured", "mix") else [0.0]
         for lam, gamma in itertools.product(lam_grid, gamma_grid):
-            cfgs.append(replace(base, name=name, lam=lam, gamma=gamma, transductive=transductive))
+            cfgs.append(replace(base, name=name, lam=lam, gamma=gamma))
     return cfgs
 
 
-def main(argv: list[str] | None = None) -> None:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--data-dir", default="data")
-    src = ap.add_mutually_exclusive_group(required=True)
-    src.add_argument("--checkpoint", type=Path)
-    src.add_argument("--simulate", type=float, metavar="SIGMA", help="oracle: GT + logit noise")
-    ap.add_argument("--holdout", choices=DOMAINS, help="evaluate on this domain of val (LODO fold)")
-    ap.add_argument("--calib-frac", type=float, default=0.0,
-                    help="fit calibration on this query-disjoint fraction, evaluate on the rest")
-    ap.add_argument("--scores", nargs="+", default=["loglik", "structured", "mix"], choices=SCORES)
-    ap.add_argument("--lams", nargs="+", type=float, default=[1.0])
-    ap.add_argument("--gammas", nargs="+", type=float, default=[0.0])
-    ap.add_argument("--exact", choices=("loglik", "structured"), default="structured")
-    ap.add_argument("--transductive", action="store_true", help="posterior over queries (needs organiser approval)")
-    ap.add_argument("--open-set", type=float, default=0.0, help="experiment B: fraction of queries removed")
-    ap.add_argument("--resample", type=int, default=0, help="keep N random queries and their images")
-    ap.add_argument("--max-queries", type=int, default=0, help="speed: same as --resample, for quick sweeps")
-    ap.add_argument("--no-domains", action="store_true")
-    ap.add_argument("--cache", type=Path, help="predictions cache (.pt) to skip inference on re-runs")
-    ap.add_argument("--save-best", action="store_true", help="write best score config + calibration to checkpoint")
-    ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
-    ap.add_argument("--workers", type=int, default=4)
-    ap.add_argument("--seed", type=int, default=0)
-    args = ap.parse_args(argv)
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
+def _predictions(cfg: DictConfig, bundle: Bundle | None, models: list | None, val: Split,
+                 needed: np.ndarray) -> Predictions:
+    """Predictions for ``val.images[needed]``: simulated, cached (same image list) or inferred."""
+    e = cfg.eval
+    if bundle is None:
+        return select(simulate(val, e.simulate, e.simulate_signal, cfg.run.seed), needed)
+    images = list(val.images[needed])
+    cache = Path(e.cache) if e.cache else None
+    if cache and cache.exists():
+        cached = torch.load(cache, weights_only=True)
+        if cached["images"] == images:
+            return cached["preds"]
+        log.info("cache %s was built for other images: recomputing", cache)
+    preds = predict(models, images, cfg.data.dir, runtime=bundle.runtime, device=resolve_device(cfg),
+                    num_workers=cfg.run.workers, batch_size=cfg.run.inference_batch)
+    if cache:
+        torch.save({"images": images, "preds": preds}, cache)
+    return preds
 
-    val = load_split(args.data_dir, "val")
-    train = load_split(args.data_dir, "train")
-    if args.holdout:
-        val = val.subset(val.domains == args.holdout)
 
-    bundle = Bundle.load(args.checkpoint) if args.checkpoint else None
+def run(cfg: DictConfig) -> dict:
+    e = cfg.eval
+    if (e.checkpoint is None) == (e.simulate is None):
+        raise ValueError("set exactly one of eval.checkpoint and eval.simulate")
+    dev, workers, seed = resolve_device(cfg), cfg.run.workers, cfg.run.seed
+    val = load_split(cfg.data.dir, "val")
+    train = load_split(cfg.data.dir, "train")
+    if e.holdout:
+        val = val.subset(val.domains == e.holdout)
+
+    bundle = Bundle.load(e.checkpoint) if e.checkpoint else None
     prior = bundle.prior if bundle else train.labels.mean(0)
-    model = bundle.build_model() if bundle else None
-    if args.cache and args.cache.exists():
-        preds = torch.load(args.cache, weights_only=True)
-    elif model is not None:
-        preds = predict(model, val.images, args.data_dir, device=args.device, num_workers=args.workers)
-    else:
-        preds = simulate(val, args.simulate, seed=args.seed)
-    if args.cache and not args.cache.exists():
-        torch.save(preds, args.cache)
+    models = bundle.build_models() if bundle else None
+    # Masks first: inference only runs on the calibration half and the evaluated gallery.
+    cal = query_mask(val, frac=e.calib_frac, seed=seed) if e.calib_frac else np.zeros(len(val), dtype=bool)
+    gal = ~cal
+    if e.resample or e.max_queries:
+        keep = query_mask(val.subset(gal), num_queries=e.resample or e.max_queries, seed=seed,
+                          by_size=bool(e.resample))
+        gal = np.zeros(len(val), dtype=bool)
+        gal[np.flatnonzero(~cal)[keep]] = True
+    needed = cal | gal
+    preds = _predictions(cfg, bundle, models, val, needed)
 
-    mask = np.ones(len(val), dtype=bool)
     calibration = bundle.calibration if bundle else Calibration()
-    if args.calib_frac:
-        cal = query_mask(val, frac=args.calib_frac, seed=args.seed)
-        calibration = fit_calibration(select(preds, cal), torch.as_tensor(val.labels[cal]))
+    if e.calib_frac:
+        calibration = fit_calibration(select(preds, cal[needed]), torch.as_tensor(val.labels[cal]), e.calibration)
         log.info("calibration fitted on %d images: %s", cal.sum(), json.dumps(calibration.to_dict()))
-        mask = ~cal
-    gallery, gpreds = val.subset(mask), select(preds, mask)
-    if args.resample or args.max_queries:
-        keep = query_mask(gallery, num_queries=args.resample or args.max_queries, seed=args.seed)
-        gallery, gpreds = gallery.subset(keep), select(gpreds, keep)
-    if args.open_set:
-        rng = np.random.default_rng(args.seed)
+    gallery, gpreds = val.subset(gal), select(preds, gal[needed])
+    if e.open_set:
+        rng = np.random.default_rng(seed)
         n = len(gallery.queries)
-        gallery = gallery.without_queries(rng.choice(n, round(args.open_set * n), replace=False))
+        gallery = gallery.without_queries(rng.choice(n, round(e.open_set * n), replace=False))
+    raw_preds = gpreds
+    ece_raw = ece_report(gpreds, gallery)
     gpreds = calibration.apply(gpreds)
+    ece_cal = ece_report(gpreds, gallery)
     log.info("gallery: %d images, %d queries", len(gallery), len(gallery.queries))
+    print("ECE (mean over attributes)  " + "  ".join(
+        f"{d}: {ece_raw[d]:.4f} -> {ece_cal[d]:.4f}" for d in ece_raw))
 
-    encoder = (lambda q: encode_queries(model, q, args.device)) if model is not None else None
-    base = bundle.score if bundle else ScoreConfig()
-    base = replace(base, exact=args.exact)
-    rows = []
-    for cfg in candidate_configs(base, args.scores, args.lams, args.gammas, args.transductive):
-        res = report(gpreds, gallery, cfg, prior, encoder, args.device, by_domain=not args.no_domains)
-        name = f"{cfg.name} lam={cfg.lam:g} gamma={cfg.gamma:g}" + (" post" if cfg.transductive else "")
-        rows.append((name, res, cfg))
+    encoder = (lambda q: encode_queries(models, q, dev)) if models is not None else None
+    novel = novel_queries(gallery, train)
+    base = score_config(cfg)
+    if e.tune_group_weights:
+        base = tune_group_weights(gpreds, gallery, replace(base, name="structured"), prior, encoder, dev,
+                                  list(e.group_weight_grid))
+    rows, raw_rows = [], []
+    for score_cfg in candidate_configs(base, list(e.scores), list(e.lams), list(e.gammas)):
+        res = report(gpreds, gallery, score_cfg, prior, encoder, dev, by_domain=e.by_domain, novel=novel)
+        name = (f"{score_cfg.name} lam={score_cfg.lam:g} gamma={score_cfg.gamma:g}"
+                + (" post" if score_cfg.transductive else ""))
+        rows.append((name, res, score_cfg))
         log.info("%s -> %s", name, json.dumps(res["all"]))
-    print(format_table([(n, r) for n, r, _ in rows]))
+        if e.compare_uncalibrated:
+            raw = report(raw_preds, gallery, score_cfg, prior, encoder, dev, by_domain=e.by_domain, novel=novel)
+            raw_rows.append((name + " (raw)", raw))
+    print(format_table([(n, r) for n, r, _ in rows] + raw_rows))
 
     best_name, best_res, best_cfg = max(rows, key=lambda r: r[1]["all"]["mADM"])
     print(f"best: {best_name}  mADM={best_res['all']['mADM']:.4f}")
-    if args.save_best and bundle is not None:
+    if e.save_best and bundle is not None:
         bundle.score, bundle.calibration = best_cfg, calibration
         bundle.meta.setdefault("evaluations", []).append(
-            {"args": {k: str(v) for k, v in vars(args).items()}, "best": best_name, "metrics": best_res})
-        bundle.save(args.checkpoint)
-        log.info("checkpoint updated: %s", args.checkpoint)
+            {"eval": to_dict(e), "best": best_name, "metrics": best_res, "ece": {"raw": ece_raw, "calibrated": ece_cal}})
+        bundle.save(e.checkpoint)
+        log.info("checkpoint updated: %s", e.checkpoint)
+    return {"best": best_cfg, "metrics": best_res, "calibration": calibration, "rows": rows, "raw_rows": raw_rows,
+            "ece": {"raw": ece_raw, "calibrated": ece_cal}}
 
+
+main = entrypoint(run)
 
 if __name__ == "__main__":
     main()

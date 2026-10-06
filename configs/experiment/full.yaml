@@ -1,0 +1,14 @@
+# Fine-tuning candidates compared by src.experiments (dotlist overrides of config.yaml).
+root: runs/experiments
+lodo: best                  # none | best | all
+ensemble_top_k: 2
+wise_alpha: 0.5
+export: submissions/best
+candidates:
+  convnext_base_linear: [model.backbone=convnext_base]
+  convnext_base_query: [model.backbone=convnext_base, model.head=query]
+  dinov2_vitb14_lora: [model.backbone=dinov2_vitb14, model.lora_rank=16, optim.lr=5.0e-4]
+  dinov3_vitb16_lora: [model.backbone=dinov3_vitb16, model.lora_rank=16, optim.lr=5.0e-4]
+  clip_vitb16_query_text: [model.backbone=clip_vitb16, model.head=query, model.text_init=true,
+                           model.trainable_stages=4, optim.backbone_lr_mult=0.1]
+  siglip2_vitb16_lora: [model.backbone=siglip2_vitb16, model.lora_rank=16, optim.lr=5.0e-4]
