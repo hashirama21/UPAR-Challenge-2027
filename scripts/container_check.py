@@ -36,7 +36,7 @@ def ingest(work: Path) -> None:
     submission = work / "submission"
     spec = importlib.util.spec_from_file_location("run", submission / "run.py")
     run = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(run)          # puts the shipped ``src`` package first on sys.path
+    spec.loader.exec_module(run)
     from src.attributes import ATTRIBUTE_NAMES
     from src.data import load_split
     from src.metrics import evaluate_output

@@ -22,6 +22,10 @@ Every value lives in `configs/`; nothing is hard-coded in the entry points.
 wrong types and unknown keys. Hydra and OmegaConf are only imported by the entry points: the
 submission reads the frozen checkpoint and needs neither.
 
+The default backbone is `${gated:dinov3_vitb16,dinov2_vitb14}`: DINOv3 ViT-B/16 once its gated
+weights are reachable (DINOv3 licence accepted on Hugging Face and `HF_TOKEN` set, or weights
+cached), DINOv2 ViT-B/14 otherwise. Setting the token is the only change needed to switch.
+
 ```bash
 python -m src.train model.backbone=clip_vitb16 model.head=query model.text_init=true model.lora_rank=16
 python -m src.train -m model.backbone=resnet50,convnext_base           # Hydra sweep

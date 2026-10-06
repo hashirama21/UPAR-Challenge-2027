@@ -46,7 +46,7 @@ augment:                    # geometric only: no colour ops, no random erasing
   scale_jitter: 0.05
 
 model:
-  backbone: convnext_base   # see src/model.py BACKBONES (torchvision CNNs/Swin, DINOv2/v3, CLIP, SigLIP 2)
+  backbone: ${gated:dinov3_vitb16,dinov2_vitb14}  # DINOv3 once HF_TOKEN is set; see src/model.py BACKBONES
   height: 256               # rounded to the backbone patch size
   width: 128
   dropout: 0.2

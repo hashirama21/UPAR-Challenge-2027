@@ -54,7 +54,7 @@ class Source:
 
 def _download(url: str, name: str, token_env: str | None = None) -> Path:
     """Cached download into the torch hub folder; ``token_env`` names a bearer-token variable (gated repos)."""
-    path = Path(torch.hub.get_dir()) / "checkpoints" / name
+    path = _cache_path(name)
     if path.is_file():
         return path
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -109,6 +109,22 @@ def _convert_dinov2(name: str) -> Callable[[], dict[str, torch.Tensor]]:
             out[f"{b}ls1"], out[f"{b}ls2"] = sd[f"{b}ls1.gamma"], sd[f"{b}ls2.gamma"]
         return out
     return convert
+
+
+def _cache_path(name: str) -> Path:
+    return Path(torch.hub.get_dir()) / "checkpoints" / name
+
+
+def _dinov3_repo(name: str) -> str:
+    return f"facebook/dinov3-{name.split('_', 1)[1]}-pretrain-lvd1689m"
+
+
+def weights_available(name: str) -> bool:
+    """False only for a gated backbone (DINOv3) whose weights are neither cached nor reachable with HF_TOKEN."""
+    if not name.startswith("dinov3_"):
+        return True
+    cached = _cache_path(f"{_dinov3_repo(name).replace('/', '--')}.safetensors").is_file()
+    return cached or bool(os.environ.get("HF_TOKEN"))
 
 
 def convert_dinov3_state(sd: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
@@ -193,7 +209,7 @@ SOURCES: dict[str, Source] = {
     "dinov2_vitb14": Source(_dinov2(768, 12, 12), _convert_dinov2("dinov2_vitb14"), (0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
     "dinov2_vitl14": Source(_dinov2(1024, 24, 16), _convert_dinov2("dinov2_vitl14"), (0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
     **{f"dinov3_vit{size}16": Source(_dinov3(dim, depth, heads),
-                                     _convert_dinov3(f"facebook/dinov3-vit{size}16-pretrain-lvd1689m"),
+                                     _convert_dinov3(_dinov3_repo(f"dinov3_vit{size}16")),
                                      (0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
        for size, dim, depth, heads in (("s", 384, 12, 6), ("b", 768, 12, 12), ("l", 1024, 24, 16))},
     "clip_vitb16": Source(_clip(16, 768, 12, 12), _convert_clip(*CLIP_RELEASES["clip_vitb16"]), CLIP_MEAN, CLIP_STD),

@@ -71,7 +71,6 @@ def fit_calibration(preds: Predictions, labels: torch.Tensor, mode: str = "tempe
         raise ValueError(f"unknown calibration mode {mode!r}")
     y = labels.float()
     logits = preds["attr"].float()
-    # Separable per attribute: summing per-attribute means fits each parameter independently.
     attr_t, attr_b = _fit(lambda t, b: F.binary_cross_entropy_with_logits(logits / t + b, y, reduction="none")
                           .mean(0).sum(), NUM_ATTRS, with_bias=mode == "platt")
     cls = encode_groups(labels)

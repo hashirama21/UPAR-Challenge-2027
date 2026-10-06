@@ -10,9 +10,13 @@ Hydra nor OmegaConf.
     python -m src.train model.backbone=clip_vitb16 model.head=query optim.epochs=10
     python -m src.train -m model.backbone=resnet50,convnext_base          # Hydra sweep
     python -m src.experiments profile=smoke experiment=smoke
+
+``${gated:<gated>,<fallback>}`` picks the gated backbone (DINOv3) when its weights are
+reachable (``HF_TOKEN`` set or already cached) and the fallback otherwise.
 """
 from __future__ import annotations
 
+import functools
 import logging
 from dataclasses import dataclass, fields, replace
 from pathlib import Path
@@ -29,11 +33,28 @@ from omegaconf import DictConfig, OmegaConf
 from .checkpoint import Runtime
 from .losses import LossConfig
 from .model import ModelConfig
+from .pretrained import weights_available
 from .scoring import ScoreConfig
 from .transforms import AugmentConfig, input_size
 
 CONFIG_DIR = str(Path(__file__).resolve().parent.parent / "configs")
 T = TypeVar("T")
+log = logging.getLogger(__name__)
+
+
+@functools.lru_cache(maxsize=None)
+def _warn_fallback(preferred: str, fallback: str) -> None:
+    log.warning("%s weights need HF_TOKEN (licence accepted on Hugging Face): using %s", preferred, fallback)
+
+
+def _gated(preferred: str, fallback: str) -> str:
+    if weights_available(preferred):
+        return preferred
+    _warn_fallback(preferred, fallback)
+    return fallback
+
+
+OmegaConf.register_new_resolver("gated", _gated, replace=True)
 
 
 @dataclass
